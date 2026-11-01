@@ -8,12 +8,19 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+from app.db import engine, telemetry, init_db
+from sqlalchemy import insert, select, func
 
 app = FastAPI(
     title="ACI606 Cloud Fleet Challenge",
     version="0.1.0-starter",
     description="Starter API for the ACI606 Cloud Fleet Challenge.",
 )
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    init_db()
 
 Status = Literal["NORMAL", "WARNING", "CRITICAL"]
 
@@ -35,11 +42,13 @@ class PredictionRequest(Telemetry):
     pass
 
 
-# Starter storage: intentionally volatile.
-# Students must replace this with persistent storage for the final challenge.
-LATEST: dict[str, Telemetry] = {}
-HISTORY: dict[str, deque[Telemetry]] = defaultdict(lambda: deque(maxlen=100))
 REQUEST_COUNT = 0
+
+
+def count_robots() -> int:
+    stmt = select(func.count(func.distinct(telemetry.c.robot_id)))
+    with engine.connect() as conn:
+        return conn.execute(stmt).scalar()
 
 
 @app.get("/health")
@@ -48,7 +57,7 @@ def health() -> dict:
         "status": "ok",
         "service": "aci606-cloud-fleet",
         "version": app.version,
-        "robots_in_memory": len(LATEST),
+        "database": "postgresql",
         "utc": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -57,26 +66,40 @@ def health() -> dict:
 def ingest_telemetry(sample: Telemetry) -> dict:
     global REQUEST_COUNT
     REQUEST_COUNT += 1
-    LATEST[sample.robot_id] = sample
-    HISTORY[sample.robot_id].append(sample)
+    with engine.begin() as conn:
+        conn.execute(insert(telemetry).values(**sample.model_dump()))
     return {
         "accepted": True,
         "robot_id": sample.robot_id,
         "server_time": datetime.now(timezone.utc).isoformat(),
-        "note": "Starter mode: data is stored only in RAM.",
+                "note": "Stored in PostgreSQL (Neon).",
     }
 
 
 @app.get("/robots")
 def list_robots() -> list[dict]:
-    return [sample.model_dump() for sample in LATEST.values()]
+    stmt = (
+        select(telemetry)
+        .distinct(telemetry.c.robot_id)
+        .order_by(telemetry.c.robot_id, telemetry.c.timestamp.desc())
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(stmt).mappings().all()
+    return [dict(row) for row in rows]
 
 
 @app.get("/robots/{robot_id}/history")
 def robot_history(robot_id: str) -> list[dict]:
-    if robot_id not in HISTORY:
+    stmt = (
+        select(telemetry)
+        .where(telemetry.c.robot_id == robot_id)
+        .order_by(telemetry.c.timestamp)
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(stmt).mappings().all()
+    if not rows:
         raise HTTPException(status_code=404, detail="Robot not found")
-    return [sample.model_dump() for sample in HISTORY[robot_id]]
+    return [dict(row) for row in rows]
 
 
 @app.post("/predict")
@@ -94,8 +117,8 @@ def metrics() -> dict:
     # TODO E4: extend with latency, errors, throughput and model metrics.
     return {
         "requests_received": REQUEST_COUNT,
-        "robots_in_memory": len(LATEST),
-        "persistence": "RAM_ONLY",
+        "robots_tracked": count_robots(),
+        "persistence": "POSTGRESQL",
         "prediction_service": "NOT_IMPLEMENTED",
     }
 
