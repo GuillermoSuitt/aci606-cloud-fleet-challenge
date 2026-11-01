@@ -5,11 +5,7 @@ __pycache__/
 venv/
 .env
 
-# Models and generated data
-models/
-*.joblib
-*.keras
-*.h5
+# Generated data
 data/*.csv
 !data/.gitkeep
 
@@ -21,3 +17,4 @@ data/*.csv
 # OS / editor
 .DS_Store
 .vscode/
+.idea/
