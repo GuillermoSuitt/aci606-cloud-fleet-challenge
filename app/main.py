@@ -194,6 +194,29 @@ def metrics() -> dict:
         "model_version": MODEL_VERSION,
     }
 
+@app.get("/dashboard/data")
+def dashboard_data() -> dict:
+    robots = list_robots()
+
+    # Indicador histórico: cuántos registros tiene cada robot en la base
+    stmt = select(telemetry.c.robot_id, func.count()).group_by(telemetry.c.robot_id)
+    with engine.connect() as conn:
+        conteos = dict(conn.execute(stmt).all())
+
+    # Predicción de toda la flota en UNA sola llamada al modelo
+    if robots and model is not None:
+        X = pd.DataFrame(robots)[FEATURES]
+        probs = model.predict_proba(X)
+        for robot, p in zip(robots, probs):
+            i = p.argmax()
+            robot["predicted_status"] = str(model.classes_[i])
+            robot["confidence"] = round(float(p[i]), 3)
+
+    for robot in robots:
+        robot["samples"] = conteos.get(robot["robot_id"], 0)
+
+    return {"robots": robots, "service": metrics()}
+
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard() -> str:
