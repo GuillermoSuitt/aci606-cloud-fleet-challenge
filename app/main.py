@@ -1,15 +1,25 @@
 from __future__ import annotations
 
-from collections import defaultdict, deque
+import os                                   # 👈 NUEVO
+import time                                 # 👈 NUEVO
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+import joblib                               # 👈 NUEVO
+import pandas as pd                         # 👈 NUEVO
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
-from app.db import engine, telemetry, init_db
+from pydantic import BaseModel, ConfigDict, Field   # 👈 NUEVO: ConfigDict
 from sqlalchemy import insert, select, func
+
+from app.db import engine, telemetry, init_db
+
+# 👇 NUEVO: configuración del modelo
+MODEL_PATH = os.environ.get("MODEL_PATH", "models/model.joblib")
+MODEL_VERSION = "v1"
+FEATURES = ["speed", "battery", "motor_temp", "vibration", "motor_current", "obstacle_distance"]
+model = None
 
 app = FastAPI(
     title="ACI606 Cloud Fleet Challenge",
@@ -20,12 +30,17 @@ app = FastAPI(
 
 @app.on_event("startup")
 def on_startup() -> None:
+    global model                            # 👈 NUEVO
     init_db()
+    model = joblib.load(MODEL_PATH)         # 👈 NUEVO
+
 
 Status = Literal["NORMAL", "WARNING", "CRITICAL"]
 
 
 class Telemetry(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)   # 👈 NUEVO: rechaza NaN e Infinity
+
     robot_id: str = Field(min_length=1, max_length=20)
     timestamp: float
     x: float
@@ -72,7 +87,7 @@ def ingest_telemetry(sample: Telemetry) -> dict:
         "accepted": True,
         "robot_id": sample.robot_id,
         "server_time": datetime.now(timezone.utc).isoformat(),
-                "note": "Stored in PostgreSQL (Neon).",
+        "note": "Stored in PostgreSQL (Neon).",
     }
 
 
@@ -102,14 +117,27 @@ def robot_history(robot_id: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+# 👇 NUEVO: /predict completo (reemplaza al que daba 501)
 @app.post("/predict")
-def predict(_: PredictionRequest) -> dict:
-    # TODO E4: load the trained model and return a real prediction.
-    # Required contract is documented in README.md and the student guide.
-    raise HTTPException(
-        status_code=501,
-        detail="/predict is part of the challenge. Train and integrate your model.",
-    )
+def predict(sample: PredictionRequest) -> dict:
+    if model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    inicio = time.perf_counter()
+
+    X = pd.DataFrame([sample.model_dump()])[FEATURES]
+    probabilidades = model.predict_proba(X)[0]
+    idx = probabilidades.argmax()
+
+    inference_ms = (time.perf_counter() - inicio) * 1000
+
+    return {
+        "robot_id": sample.robot_id,
+        "predicted_status": str(model.classes_[idx]),
+        "confidence": round(float(probabilidades[idx]), 4),
+        "model_version": MODEL_VERSION,
+        "inference_ms": round(inference_ms, 2),
+    }
 
 
 @app.get("/metrics")
@@ -119,7 +147,7 @@ def metrics() -> dict:
         "requests_received": REQUEST_COUNT,
         "robots_tracked": count_robots(),
         "persistence": "POSTGRESQL",
-        "prediction_service": "NOT_IMPLEMENTED",
+        "prediction_service": "ACTIVE",    # 👈 cambiado
     }
 
 
