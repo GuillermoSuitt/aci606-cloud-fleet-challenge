@@ -66,7 +66,7 @@ def main() -> None:
         ),
         "random_forest": make_pipeline(
             StandardScaler(),
-            RandomForestClassifier(n_estimators=300, class_weight="balanced", random_state=42),
+            RandomForestClassifier(n_estimators=100, class_weight="balanced", random_state=42),
         ),
     }
 
