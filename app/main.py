@@ -9,7 +9,7 @@ from typing import Literal
 import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse   # 👈 NUEVO: RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import insert, select, func
 
@@ -19,7 +19,6 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "models/model.joblib")
 MODEL_VERSION = "v1"
 FEATURES = ["speed", "battery", "motor_temp", "vibration", "motor_current", "obstacle_distance"]
 model = None
-
 
 START_TIME = time.time()
 TELEMETRY_COUNT = 0
@@ -40,7 +39,6 @@ def on_startup() -> None:
     global model
     init_db()
     model = joblib.load(MODEL_PATH)
-
 
 
 @app.middleware("http")
@@ -84,6 +82,12 @@ def count_robots() -> int:
     stmt = select(func.count(func.distinct(telemetry.c.robot_id)))
     with engine.connect() as conn:
         return conn.execute(stmt).scalar()
+
+
+# 👇 NUEVO: la raíz "/" redirige al dashboard (y responde a la revisión HEAD de Render)
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+def root():
+    return RedirectResponse(url="/dashboard")
 
 
 @app.get("/health")
@@ -164,7 +168,6 @@ def predict(sample: PredictionRequest) -> dict:
     }
 
 
-# 👇 NUEVO: /metrics completo
 @app.get("/metrics")
 def metrics() -> dict:
     lat = sorted(PREDICT_LATENCIES)
@@ -193,6 +196,7 @@ def metrics() -> dict:
         "persistence": "POSTGRESQL",
         "model_version": MODEL_VERSION,
     }
+
 
 @app.get("/dashboard/data")
 def dashboard_data() -> dict:
