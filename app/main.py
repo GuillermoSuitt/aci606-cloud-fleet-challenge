@@ -1,25 +1,32 @@
 from __future__ import annotations
 
-import os                                   # 👈 NUEVO
-import time                                 # 👈 NUEVO
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-import joblib                               # 👈 NUEVO
-import pandas as pd                         # 👈 NUEVO
+import joblib
+import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, ConfigDict, Field   # 👈 NUEVO: ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import insert, select, func
 
 from app.db import engine, telemetry, init_db
 
-# 👇 NUEVO: configuración del modelo
 MODEL_PATH = os.environ.get("MODEL_PATH", "models/model.joblib")
 MODEL_VERSION = "v1"
 FEATURES = ["speed", "battery", "motor_temp", "vibration", "motor_current", "obstacle_distance"]
 model = None
+
+
+START_TIME = time.time()
+TELEMETRY_COUNT = 0
+PREDICT_COUNT = 0
+CLIENT_ERRORS = 0
+SERVER_ERRORS = 0
+PREDICT_LATENCIES: list[float] = []
 
 app = FastAPI(
     title="ACI606 Cloud Fleet Challenge",
@@ -30,16 +37,32 @@ app = FastAPI(
 
 @app.on_event("startup")
 def on_startup() -> None:
-    global model                            # 👈 NUEVO
+    global model
     init_db()
-    model = joblib.load(MODEL_PATH)         # 👈 NUEVO
+    model = joblib.load(MODEL_PATH)
+
+
+
+@app.middleware("http")
+async def count_errors(request, call_next):
+    global CLIENT_ERRORS, SERVER_ERRORS
+    try:
+        response = await call_next(request)
+    except Exception:
+        SERVER_ERRORS += 1
+        raise
+    if 400 <= response.status_code < 500:
+        CLIENT_ERRORS += 1
+    elif response.status_code >= 500:
+        SERVER_ERRORS += 1
+    return response
 
 
 Status = Literal["NORMAL", "WARNING", "CRITICAL"]
 
 
 class Telemetry(BaseModel):
-    model_config = ConfigDict(allow_inf_nan=False)   # 👈 NUEVO: rechaza NaN e Infinity
+    model_config = ConfigDict(allow_inf_nan=False)
 
     robot_id: str = Field(min_length=1, max_length=20)
     timestamp: float
@@ -57,9 +80,6 @@ class PredictionRequest(Telemetry):
     pass
 
 
-REQUEST_COUNT = 0
-
-
 def count_robots() -> int:
     stmt = select(func.count(func.distinct(telemetry.c.robot_id)))
     with engine.connect() as conn:
@@ -73,14 +93,15 @@ def health() -> dict:
         "service": "aci606-cloud-fleet",
         "version": app.version,
         "database": "postgresql",
+        "model_loaded": model is not None,
         "utc": datetime.now(timezone.utc).isoformat(),
     }
 
 
 @app.post("/telemetry")
 def ingest_telemetry(sample: Telemetry) -> dict:
-    global REQUEST_COUNT
-    REQUEST_COUNT += 1
+    global TELEMETRY_COUNT
+    TELEMETRY_COUNT += 1
     with engine.begin() as conn:
         conn.execute(insert(telemetry).values(**sample.model_dump()))
     return {
@@ -117,9 +138,11 @@ def robot_history(robot_id: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-# 👇 NUEVO: /predict completo (reemplaza al que daba 501)
 @app.post("/predict")
 def predict(sample: PredictionRequest) -> dict:
+    global PREDICT_COUNT
+    PREDICT_COUNT += 1
+
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -130,6 +153,7 @@ def predict(sample: PredictionRequest) -> dict:
     idx = probabilidades.argmax()
 
     inference_ms = (time.perf_counter() - inicio) * 1000
+    PREDICT_LATENCIES.append(inference_ms)
 
     return {
         "robot_id": sample.robot_id,
@@ -140,14 +164,34 @@ def predict(sample: PredictionRequest) -> dict:
     }
 
 
+# 👇 NUEVO: /metrics completo
 @app.get("/metrics")
 def metrics() -> dict:
-    # TODO E4: extend with latency, errors, throughput and model metrics.
+    lat = sorted(PREDICT_LATENCIES)
+
+    def percentil(p: float) -> float:
+        if not lat:
+            return 0.0
+        return round(lat[min(len(lat) - 1, int(p * len(lat)))], 2)
+
     return {
-        "requests_received": REQUEST_COUNT,
+        "uptime_seconds": round(time.time() - START_TIME, 1),
+        "requests": {
+            "telemetry": TELEMETRY_COUNT,
+            "predict": PREDICT_COUNT,
+        },
+        "errors": {
+            "client_4xx": CLIENT_ERRORS,
+            "server_5xx": SERVER_ERRORS,
+        },
+        "predict_latency_ms": {
+            "avg": round(sum(lat) / len(lat), 2) if lat else 0.0,
+            "p50": percentil(0.50),
+            "p95": percentil(0.95),
+        },
         "robots_tracked": count_robots(),
         "persistence": "POSTGRESQL",
-        "prediction_service": "ACTIVE",    # 👈 cambiado
+        "model_version": MODEL_VERSION,
     }
 
 
