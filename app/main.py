@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import Literal
 
 import joblib
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse   # 👈 NUEVO: RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import insert, select, func
 
@@ -78,13 +79,28 @@ class PredictionRequest(Telemetry):
     pass
 
 
+def predecir_proba(X: pd.DataFrame) -> np.ndarray:
+    """Probabilidades de cada clase, idénticas a model.predict_proba(X).
+
+    Recorre los árboles del Random Forest directamente y promedia sus votos.
+    Evita el costo fijo de joblib que scikit-learn agrega en cada llamada,
+    que con 0,1 CPU en Render era la mayor parte de la latencia.
+    """
+    escalador, bosque = model.steps[0][1], model.steps[-1][1]
+    xs = ((X[FEATURES].to_numpy(dtype=float) - escalador.mean_) / escalador.scale_).astype(np.float32)
+    total = np.zeros((len(xs), len(bosque.classes_)))
+    for arbol in bosque.estimators_:
+        votos = arbol.tree_.predict(xs)
+        total += votos / votos.sum(axis=1, keepdims=True)
+    return total / len(bosque.estimators_)
+
+
 def count_robots() -> int:
     stmt = select(func.count(func.distinct(telemetry.c.robot_id)))
     with engine.connect() as conn:
         return conn.execute(stmt).scalar()
 
 
-# 👇 NUEVO: la raíz "/" redirige al dashboard (y responde a la revisión HEAD de Render)
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 def root():
     return RedirectResponse(url="/dashboard")
@@ -153,7 +169,7 @@ def predict(sample: PredictionRequest) -> dict:
     inicio = time.perf_counter()
 
     X = pd.DataFrame([sample.model_dump()])[FEATURES]
-    probabilidades = model.predict_proba(X)[0]
+    probabilidades = predecir_proba(X)[0]
     idx = probabilidades.argmax()
 
     inference_ms = (time.perf_counter() - inicio) * 1000
@@ -210,7 +226,7 @@ def dashboard_data() -> dict:
     # Predicción de toda la flota en UNA sola llamada al modelo
     if robots and model is not None:
         X = pd.DataFrame(robots)[FEATURES]
-        probs = model.predict_proba(X)
+        probs = predecir_proba(X)
         for robot, p in zip(robots, probs):
             i = p.argmax()
             robot["predicted_status"] = str(model.classes_[i])
