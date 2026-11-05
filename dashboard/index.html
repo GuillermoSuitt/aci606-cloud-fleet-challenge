@@ -10,16 +10,16 @@
     header { padding:22px 28px; border-bottom:1px solid #30363d; display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
     h1 { margin:0; font-size:22px; }
     .tag { color:#8b949e; font-size:14px; }
-    main { padding:28px; display:flex; flex-direction:column; gap:24px; }
+    main { padding:28px; display:flex; flex-direction:column; gap:28px; }
     h2 { margin:0 0 12px; font-size:16px; color:#8b949e; text-transform:uppercase; letter-spacing:1px; }
     .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
     .kpi { border:1px solid #30363d; border-radius:12px; padding:14px; background:#161b22; }
     .kpi .v { font-size:24px; font-weight:700; margin-top:4px; }
     .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; }
     .card { border:1px solid #30363d; border-radius:14px; padding:18px; background:#161b22; }
-    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; gap:8px; }
     .robot { font-size:20px; font-weight:700; }
-    .badge { padding:4px 10px; border-radius:99px; font-size:12px; font-weight:700; }
+    .badge { padding:4px 10px; border-radius:99px; font-size:12px; font-weight:700; white-space:nowrap; }
     .NORMAL { background:#1f6f43; color:#d2f8e2; }
     .WARNING { background:#8a5a00; color:#ffefc7; }
     .CRITICAL { background:#a1262b; color:#ffe0e0; }
@@ -28,6 +28,18 @@
     .fill { height:100%; }
     .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
     .empty { padding:40px; text-align:center; color:#8b949e; border:1px dashed #30363d; border-radius:14px; }
+    .control { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; }
+    .slider { display:grid; grid-template-columns:130px 1fr 60px; align-items:center; gap:10px; padding:6px 0; color:#c9d1d9; }
+    .slider input { width:100%; accent-color:#58a6ff; }
+    .slider span:last-child { text-align:right; font-variant-numeric:tabular-nums; }
+    .btns { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 4px; }
+    button { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:8px; padding:8px 12px; font:inherit; font-size:14px; cursor:pointer; }
+    button:hover { border-color:#58a6ff; }
+    button.primary { background:#1f6feb; border-color:#1f6feb; }
+    input[type=text] { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:8px; padding:8px 10px; font:inherit; width:100%; box-sizing:border-box; }
+    .result { margin-top:12px; padding:14px; border-radius:10px; background:#0d1117; border:1px solid #30363d; min-height:24px; }
+    .big { font-size:28px; font-weight:700; margin:6px 0; }
+    .log { font-family:ui-monospace, monospace; font-size:13px; color:#c9d1d9; white-space:pre-wrap; }
   </style>
 </head>
 <body>
@@ -40,6 +52,33 @@
     <h2>Estado del servicio</h2>
     <div id="kpis" class="kpis"></div>
   </section>
+
+  <section>
+    <h2>Panel de control · pruébalo en vivo</h2>
+    <div class="control">
+      <div class="card">
+        <div class="top"><div class="robot">Sensores</div><span class="tag">mueve los controles</span></div>
+        <div id="sliders"></div>
+        <div class="btns">
+          <button onclick="preset('sano')">Robot sano</button>
+          <button onclick="preset('cansado')">Robot desgastado</button>
+          <button onclick="preset('critico')">Falla crítica</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="top"><div class="robot">Predicción en vivo</div><span class="tag">POST /predict</span></div>
+        <div id="pred" class="result"><span class="tag">Mueve un control para predecir…</span></div>
+        <div class="top" style="margin-top:20px"><div class="robot">Inyectar robot</div><span class="tag">POST /telemetry</span></div>
+        <input type="text" id="rid" value="PROF-01" maxlength="20" aria-label="ID del robot" />
+        <div class="btns">
+          <button class="primary" onclick="inyectar()">Enviar a la flota</button>
+          <button onclick="invalido()">Enviar dato inválido</button>
+        </div>
+        <div id="log" class="result log"><span class="tag">El robot aparecerá abajo, en la flota, en unos segundos.</span></div>
+      </div>
+    </div>
+  </section>
+
   <section>
     <h2>Flota</h2>
     <div id="cards" class="cards"></div>
@@ -50,6 +89,92 @@ const cards = document.getElementById('cards');
 const kpis = document.getElementById('kpis');
 const statusEl = document.getElementById('status');
 
+// ---------- Panel de control ----------
+const CAMPOS = [
+  { k: 'battery', label: 'Batería (%)', min: 0, max: 100, step: 0.5, v: 90 },
+  { k: 'motor_temp', label: 'Temp. motor (°C)', min: 30, max: 90, step: 0.5, v: 48 },
+  { k: 'vibration', label: 'Vibración', min: 0, max: 2.5, step: 0.01, v: 0.45 },
+  { k: 'motor_current', label: 'Corriente (A)', min: 2, max: 8, step: 0.05, v: 4.2 },
+  { k: 'speed', label: 'Velocidad', min: 0, max: 1.5, step: 0.01, v: 0.85 },
+  { k: 'obstacle_distance', label: 'Obstáculo (m)', min: 0.05, max: 4, step: 0.05, v: 1.5 },
+];
+const PRESETS = {
+  sano:    { speed: 0.85, battery: 90, motor_temp: 48, vibration: 0.45, motor_current: 4.2, obstacle_distance: 1.5 },
+  cansado: { speed: 0.80, battery: 78, motor_temp: 60, vibration: 0.90, motor_current: 4.9, obstacle_distance: 1.0 },
+  critico: { speed: 0.75, battery: 55, motor_temp: 75, vibration: 1.60, motor_current: 5.9, obstacle_distance: 0.5 },
+};
+
+document.getElementById('sliders').innerHTML = CAMPOS.map(c => `
+  <label class="slider"><span>${c.label}</span>
+    <input type="range" id="s_${c.k}" min="${c.min}" max="${c.max}" step="${c.step}" value="${c.v}" oninput="cambio('${c.k}')">
+    <span id="v_${c.k}">${c.v}</span></label>`).join('');
+
+function lectura() {
+  const d = { robot_id: (document.getElementById('rid').value || 'PROF-01').trim(), timestamp: Date.now() / 1000, x: 5, y: 5 };
+  CAMPOS.forEach(c => d[c.k] = Number(document.getElementById('s_' + c.k).value));
+  return d;
+}
+
+let espera;
+function cambio(k) {
+  document.getElementById('v_' + k).textContent = document.getElementById('s_' + k).value;
+  clearTimeout(espera);
+  espera = setTimeout(predecir, 250);
+}
+
+function preset(nombre) {
+  Object.entries(PRESETS[nombre]).forEach(([k, v]) => {
+    document.getElementById('s_' + k).value = v;
+    document.getElementById('v_' + k).textContent = v;
+  });
+  predecir();
+}
+
+async function predecir() {
+  const pred = document.getElementById('pred');
+  try {
+    const res = await fetch('/predict', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(lectura()) });
+    const r = await res.json();
+    if (!res.ok) { pred.innerHTML = `<span class="tag">Error ${res.status}</span>`; return; }
+    pred.innerHTML = `<span class="badge ${r.predicted_status}">${r.predicted_status}</span>
+      <div class="big">${(r.confidence * 100).toFixed(1)} % de confianza</div>
+      <span class="tag">modelo ${r.model_version} · inferencia ${r.inference_ms} ms</span>`;
+  } catch (e) {
+    pred.innerHTML = '<span class="tag">API no disponible</span>';
+  }
+}
+
+async function inyectar() {
+  const log = document.getElementById('log');
+  const d = lectura();
+  try {
+    const res = await fetch('/telemetry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) });
+    const r = await res.json();
+    log.textContent = res.ok
+      ? `✔ ${res.status} · ${d.robot_id} guardado en PostgreSQL\n${r.server_time}`
+      : `✘ ${res.status} · ${JSON.stringify(r.detail)}`;
+    refresh();
+  } catch (e) {
+    log.textContent = 'API no disponible';
+  }
+}
+
+async function invalido() {
+  const log = document.getElementById('log');
+  const d = lectura();
+  delete d.battery;
+  d.speed = -1;
+  try {
+    const res = await fetch('/telemetry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) });
+    const r = await res.json();
+    const errores = (r.detail || []).map(e => `${e.loc[e.loc.length - 1]}: ${e.msg}`).join('\n');
+    log.textContent = `Enviado sin "battery" y con speed = -1\n→ ${res.status} ${res.status === 422 ? '(rechazado, el servicio sigue activo)' : ''}\n${errores}`;
+  } catch (e) {
+    log.textContent = 'API no disponible';
+  }
+}
+
+// ---------- Estado y flota ----------
 function kpi(label, value) {
   return `<div class="kpi"><div class="tag">${label}</div><div class="v">${value}</div></div>`;
 }
